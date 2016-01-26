@@ -4,7 +4,7 @@ name = "scoped-pool"
 version = "0.1.0"
 authors = ["Jonathan Reem <jonathan.reem@gmail.com>"]
 repository = "https://github.com/reem/rust-scoped-pool.git"
-description = ""
+description = "A flexible thread pool providing scoped threads."
 readme = "README.md"
 license = "MIT"
 
