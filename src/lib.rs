@@ -53,6 +53,7 @@ impl Pool {
     }
 
     fn run_thread(&self) {
+
         loop {
             match self.queue.pop() {
                 // On Quit, repropogate and quit.
@@ -62,8 +63,9 @@ impl Pool {
                 },
                 // On Task, run the task then complete the WaitGroup.
                 PoolMessage::Task(job, wait) => {
+                    let sentinel = Sentinel(self.clone(), Some(wait.clone()));
                     job.run();
-                    wait.complete();
+                    sentinel.cancel();
                 }
             }
         }
@@ -92,7 +94,7 @@ impl<'scope> Scope<'scope> {
 
         let task = unsafe {
             // Safe because we will ensure the task finishes executing before
-            // 'scope via calling `join` before the resolution of `'scope`.
+            // 'scope via joining before the resolution of `'scope`.
             mem::transmute::<Box<Task + Send + 'scope>,
                              Box<Task + Send + 'static>>(Box::new(job))
         };
@@ -106,7 +108,7 @@ impl<'scope> Scope<'scope> {
           'scope: 'smaller {
         let scope = unsafe { self.refine::<'smaller>() };
 
-        // Schedule all tasks then join all tasks.
+        // Schedule all tasks then join all tasks
         let res = scheduler(&scope);
         scope.join();
 
@@ -122,8 +124,8 @@ impl<'scope> Scope<'scope> {
         self.wait.join()
     }
 
-    // Create a new scope with a different lifetime on the same pool.
-    unsafe fn refine<'other>(&self) -> Scope<'other> {
+    // Create a new scope with a smaller lifetime on the same pool.
+    unsafe fn refine<'other>(&self) -> Scope<'other> where 'scope: 'other {
         Scope {
             pool: self.pool.clone(),
             wait: Arc::new(WaitGroup::new()),
@@ -138,9 +140,16 @@ enum PoolMessage {
 }
 
 pub struct WaitGroup {
+    // Count of currently active tasks.
     active: AtomicUsize,
-    // We only ever grab this mutex on joining threads.
-    lock: Mutex<()>,
+
+    // The lock and condition variable the joining threads
+    // use to wait for the active tasks to complete.
+    //
+    // The lock contains a flag set to true by default,
+    // and which is set to false to poison the group, causing
+    // joins to panic.
+    lock: Mutex<bool>,
     cond: Condvar
 }
 
@@ -149,7 +158,7 @@ impl WaitGroup {
     pub fn new() -> Self {
         WaitGroup {
             active: AtomicUsize::new(0),
-            lock: Mutex::new(()),
+            lock: Mutex::new(true),
             cond: Condvar::new()
         }
     }
@@ -163,8 +172,17 @@ impl WaitGroup {
     /// Complete a previous `submit`.
     pub fn complete(&self) {
         if self.active.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.cond.notify_one()
+            self.cond.notify_all()
         }
+    }
+
+    /// Poison the WaitGroup so all `join`ing threads panic.
+    pub fn poison(&self) {
+        // Set the poison flag to false.
+        *self.lock.lock().unwrap() = false;
+
+        // Wake all pending joiners so they panic.
+        self.cond.notify_all()
     }
 
     /// Wait for `submit`s to this WaitGroup to be `complete`d.
@@ -177,14 +195,39 @@ impl WaitGroup {
     /// Before submitting, `join` will always return immediately.
     pub fn join(&self) {
         // Check optimistically once before loading the lock.
-        if self.active.load(Ordering::SeqCst) <= 0 { return }
+        if self.active.load(Ordering::SeqCst) <= 0 {
+            return
+        }
 
         let mut lock = self.lock.lock().unwrap();
-        while self.active.load(Ordering::SeqCst) > 0 {
-            lock = self.cond.wait(lock).unwrap();
+        loop {
+            if !*lock {
+                panic!("WaitGroup explicitly poisoned!");
+            }
+
+            if self.active.load(Ordering::SeqCst) <= 0 {
+                return
+            } else {
+                lock = self.cond.wait(lock).unwrap();
+            }
         }
     }
 }
+
+struct Sentinel(Pool, Option<Arc<WaitGroup>>);
+
+impl Sentinel {
+    fn cancel(mut self) {
+        self.1.take().map(|wait| wait.complete());
+    }
+}
+
+impl Drop for Sentinel {
+    fn drop(&mut self) {
+        self.1.take().map(|wait| wait.poison());
+    }
+}
+
 
 trait Task {
     fn run(self: Box<Self>);
@@ -196,10 +239,12 @@ impl<F: FnOnce()> Task for F {
 
 #[cfg(test)]
 mod test {
-    use Pool;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use {Pool, Scope};
 
     #[test]
-    fn simple_use() {
+    fn test_simple_use() {
         let pool = Pool::new(4);
 
         let mut buf = [0, 0, 0, 0];
@@ -214,7 +259,7 @@ mod test {
     }
 
     #[test]
-    fn zoom() {
+    fn test_zoom() {
         let pool = Pool::new(4);
 
         let mut outer = 0;
@@ -228,6 +273,52 @@ mod test {
         });
 
         assert_eq!(outer, 1);
+    }
+
+    #[test]
+    fn test_spawn_doesnt_hang() {
+        let pool = Pool::new(1);
+        pool.spawn(move || loop {});
+    }
+
+    #[test]
+    fn test_forever_zoom() {
+        let pool = Pool::new(16);
+        let forever = Scope::forever(pool.clone());
+
+        let ran = AtomicBool::new(false);
+
+        forever.zoom(|scope| scope.execute(|| ran.store(true, Ordering::SeqCst)));
+
+        assert!(ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_scheduler_panic() {
+        let pool = Pool::new(4);
+        pool.scoped(|_| panic!());
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_scoped_execute_panic() {
+        let pool = Pool::new(4);
+        pool.scoped(|scope| scope.execute(|| panic!()));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_pool_panic() {
+        let _pool = Pool::new(1);
+        panic!();
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_zoomed_scoped_execute_panic() {
+        let pool = Pool::new(4);
+        pool.scoped(|scope| scope.zoom(|scope2| scope2.execute(|| panic!())));
     }
 }
 
