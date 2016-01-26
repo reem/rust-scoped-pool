@@ -112,8 +112,12 @@ impl<'scope> Scope<'scope> {
         res
     }
 
-    // Awaits all jobs submitted on this queue to be completed.
-    fn join(self) {
+    /// Awaits all jobs submitted on this Scope to be completed.
+    ///
+    /// Only guaranteed to join jobs which where `execute`d logically
+    /// prior to `join`. Jobs `execute`d concurrently with `join` may
+    /// or may not be completed before `join` returns.
+    pub fn join(&self) {
         self.wait.join()
     }
 
