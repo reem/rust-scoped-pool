@@ -17,14 +17,12 @@ use std::sync::{Arc, Mutex, Condvar};
 
 #[derive(Clone)]
 pub struct Pool {
-    threads: usize,
     queue: Arc<MsQueue<PoolMessage>>
 }
 
 impl Pool {
     pub fn new(size: usize) -> Pool {
         let pool = Pool {
-            threads: size,
             queue: Arc::new(MsQueue::new())
         };
 
@@ -36,15 +34,13 @@ impl Pool {
         pool
     }
 
-    pub fn scoped<'pool: 'scope, 'scope, F, R>(&'pool self, scheduler: F) -> R
+    pub fn spawn<F: FnOnce() + Send + 'static>(&self, job: F) {
+        Scope::forever(self.clone()).execute(job)
+    }
+
+    pub fn scoped<'scope, F, R>(&self, scheduler: F) -> R
     where F: FnOnce(&Scope<'scope>) -> R {
-        let scope = unsafe { Scope::new(self) };
-
-        // Schedule all tasks, then join all tasks.
-        let res = scheduler(&scope);
-        scope.join();
-
-        res
+        Scope::forever(self.clone()).zoom(scheduler)
     }
 
     /// Shutdown the Pool.
@@ -80,9 +76,9 @@ pub struct Scope<'scope> {
 }
 
 impl<'scope> Scope<'scope> {
-    unsafe fn new(pool: &Pool) -> Self {
+    pub fn forever(pool: Pool) -> Scope<'static> {
         Scope {
-            pool: pool.clone(),
+            pool: pool,
             wait: Arc::new(WaitGroup::new()),
             _scope: Id::default()
         }
@@ -104,9 +100,30 @@ impl<'scope> Scope<'scope> {
         self.pool.queue.push(PoolMessage::Task(task, self.wait.clone()));
     }
 
+    pub fn zoom<'smaller, F, R>(&self, scheduler: F) -> R
+    where F: FnOnce(&Scope<'smaller>) -> R,
+          'scope: 'smaller {
+        let scope = unsafe { self.refine::<'smaller>() };
+
+        // Schedule all tasks then join all tasks.
+        let res = scheduler(&scope);
+        scope.join();
+
+        res
+    }
+
     // Awaits all jobs submitted on this queue to be completed.
     fn join(self) {
         self.wait.join()
+    }
+
+    // Create a new scope with a different lifetime on the same pool.
+    unsafe fn refine<'other>(&self) -> Scope<'other> {
+        Scope {
+            pool: self.pool.clone(),
+            wait: Arc::new(WaitGroup::new()),
+            _scope: Id::default()
+        }
     }
 }
 
@@ -178,6 +195,23 @@ mod test {
         });
 
         assert_eq!(&buf, &[1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn zoom() {
+        let pool = Pool::new(4);
+
+        let mut outer = 0;
+
+        pool.scoped(|scope| {
+            let mut inner = 0;
+            scope.zoom(|scope2| scope2.execute(|| inner = 1));
+            assert_eq!(inner, 1);
+
+            outer = 1;
+        });
+
+        assert_eq!(outer, 1);
     }
 }
 
