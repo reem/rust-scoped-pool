@@ -13,6 +13,7 @@ use variance::InvariantLifetime as Id;
 use crossbeam::sync::MsQueue;
 
 use std::{thread, mem};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Condvar};
 
 #[derive(Clone)]
@@ -136,39 +137,50 @@ enum PoolMessage {
     Task(Box<Task + Send>, Arc<WaitGroup>)
 }
 
-struct WaitGroup {
-    active: Mutex<usize>,
+pub struct WaitGroup {
+    active: AtomicUsize,
+    // We only ever grab this mutex on joining threads.
+    lock: Mutex<()>,
     cond: Condvar
 }
 
 impl WaitGroup {
     /// Create a new empty WaitGroup.
-    fn new() -> Self {
+    pub fn new() -> Self {
         WaitGroup {
-            active: Mutex::new(0),
+            active: AtomicUsize::new(0),
+            lock: Mutex::new(()),
             cond: Condvar::new()
         }
     }
 
-    /// Submit a job to this WaitGroup, causing `join` to wait
-    /// for an additional `complete` call.
-    fn submit(&self) {
-        *self.active.lock().unwrap() += 1;
+    /// Submit to this WaitGroup, causing `join` to wait
+    /// for an additional `complete`.
+    pub fn submit(&self) {
+        self.active.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Complete a previously `submit`ted job.
-    fn complete(&self) {
-        *self.active.lock().unwrap() -= 1;
-        self.cond.notify_one()
+    /// Complete a previous `submit`.
+    pub fn complete(&self) {
+        if self.active.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.cond.notify_one()
+        }
     }
 
-    /// Wait for all jobs `submit`ted to this WaitGroup to be `complete`d.
-    fn join(&self) {
-        let mut lock = self.active.lock().unwrap();
+    /// Wait for `submit`s to this WaitGroup to be `complete`d.
+    ///
+    /// Submits occuring completely before joins will always be waited on.
+    ///
+    /// Submits occuring concurrently with a `join` may or may not
+    /// be waited for.
+    ///
+    /// Before submitting, `join` will always return immediately.
+    pub fn join(&self) {
+        // Check optimistically once before loading the lock.
+        if self.active.load(Ordering::SeqCst) <= 0 { return }
 
-        loop {
-            if *lock == 0 { break }
-
+        let mut lock = self.lock.lock().unwrap();
+        while self.active.load(Ordering::SeqCst) > 0 {
             lock = self.cond.wait(lock).unwrap();
         }
     }
