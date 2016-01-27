@@ -150,6 +150,18 @@ impl<'scope> Scope<'scope> {
         self.pool.queue.push(PoolMessage::Task(task, self.wait.clone()));
     }
 
+    /// Add a job to this scope which itself will get access to the scope.
+    ///
+    /// Like with `execute`, subsequent calls to `join` will wait for this
+    /// job (and all jobs scheduled on the scope it receives) to complete.
+    pub fn recurse<F>(&self, job: F)
+    where F: FnOnce(&Self) + Send + 'scope {
+        // Create another scope with the *same* lifetime.
+        let this = unsafe { self.clone() };
+
+        self.execute(move || job(&this));
+    }
+
     /// Create a new subscope, bound to a lifetime smaller than our existing Scope.
     ///
     /// The subscope has a different job set, and is joined before zoom returns.
@@ -172,6 +184,14 @@ impl<'scope> Scope<'scope> {
     /// or may not be completed before `join` returns.
     pub fn join(&self) {
         self.wait.join()
+    }
+
+    unsafe fn clone(&self) -> Self {
+        Scope {
+            pool: self.pool.clone(),
+            wait: self.wait.clone(),
+            _scope: Id::default()
+        }
     }
 
     // Create a new scope with a smaller lifetime on the same pool.
