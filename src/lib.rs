@@ -170,6 +170,18 @@ impl<'scope> Scope<'scope> {
         self.pool.queue.push(PoolMessage::Task(task, self.wait.clone()));
     }
 
+    /// Add a job to this scope which itself will get access to the scope.
+    ///
+    /// Like with `execute`, subsequent calls to `join` will wait for this
+    /// job (and all jobs scheduled on the scope it receives) to complete.
+    pub fn recurse<F>(&self, job: F)
+    where F: FnOnce(&Self) + Send + 'scope {
+        // Create another scope with the *same* lifetime.
+        let this = unsafe { self.clone() };
+
+        self.execute(move || job(&this));
+    }
+
     /// Create a new subscope, bound to a lifetime smaller than our existing Scope.
     ///
     /// The subscope has a different job set, and is joined before zoom returns.
@@ -192,6 +204,14 @@ impl<'scope> Scope<'scope> {
     /// or may not be completed before `join` returns.
     pub fn join(&self) {
         self.wait.join()
+    }
+
+    unsafe fn clone(&self) -> Self {
+        Scope {
+            pool: self.pool.clone(),
+            wait: self.wait.clone(),
+            _scope: Id::default()
+        }
     }
 
     // Create a new scope with a smaller lifetime on the same pool.
@@ -338,6 +358,25 @@ mod test {
     }
 
     #[test]
+    fn test_recurse() {
+        let pool = Pool::new(12);
+
+        let mut buf = [0, 0, 0, 0];
+
+        pool.scoped(|next| {
+            next.recurse(|next| {
+                buf[0] = 1;
+
+                next.execute(|| {
+                    buf[1] = 1;
+                });
+            });
+        });
+
+        assert_eq!(&buf, &[1, 1, 0, 0]);
+    }
+
+    #[test]
     fn test_spawn_doesnt_hang() {
         let pool = Pool::new(1);
         pool.spawn(move || loop {});
@@ -387,6 +426,20 @@ mod test {
     fn test_zoomed_scoped_execute_panic() {
         let pool = Pool::new(4);
         pool.scoped(|scope| scope.zoom(|scope2| scope2.execute(|| panic!())));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_recurse_scheduler_panic() {
+        let pool = Pool::new(4);
+        pool.scoped(|scope| scope.recurse(|_| panic!()));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_recurse_execute_panic() {
+        let pool = Pool::new(4);
+        pool.scoped(|scope| scope.recurse(|scope2| scope2.execute(|| panic!())));
     }
 }
 
