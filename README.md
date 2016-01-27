@@ -63,7 +63,7 @@ with the rest of your dependencies:
 
 ```toml
 [dependencies]
-scoped-pool = "*"
+scoped-pool = "0.1"
 ```
 
 ## Author
