@@ -13,7 +13,6 @@ use variance::InvariantLifetime as Id;
 use crossbeam::sync::MsQueue;
 
 use std::{thread, mem};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Condvar};
 
 /// A thread-pool providing scoped and unscoped threads.
@@ -143,7 +142,7 @@ pub struct Scope<'scope> {
 }
 
 impl<'scope> Scope<'scope> {
-    /// Createa a Scope which lasts forever.
+    /// Create a Scope which lasts forever.
     pub fn forever(pool: Pool) -> Scope<'static> {
         Scope {
             pool: pool,
@@ -215,16 +214,11 @@ enum PoolMessage {
 /// Adding new jobs is done with `submit`, jobs are completed with `complete`,
 /// and any thread may wait for all jobs to be `complete`d with `join`.
 pub struct WaitGroup {
-    // Count of currently active tasks.
-    active: AtomicUsize,
-
     // The lock and condition variable the joining threads
     // use to wait for the active tasks to complete.
     //
-    // The lock contains a flag set to true by default,
-    // and which is set to false to poison the group, causing
-    // joins to panic.
-    lock: Mutex<bool>,
+    // If the state is set to None, the group is poisoned.
+    state: Mutex<Option<usize>>,
     cond: Condvar
 }
 
@@ -232,8 +226,7 @@ impl WaitGroup {
     /// Create a new empty WaitGroup.
     pub fn new() -> Self {
         WaitGroup {
-            active: AtomicUsize::new(0),
-            lock: Mutex::new(true),
+            state: Mutex::new(Some(0)),
             cond: Condvar::new()
         }
     }
@@ -241,20 +234,24 @@ impl WaitGroup {
     /// Submit to this WaitGroup, causing `join` to wait
     /// for an additional `complete`.
     pub fn submit(&self) {
-        self.active.fetch_add(1, Ordering::SeqCst);
+        self.state.lock().unwrap().as_mut().map(|val| *val += 1);
     }
 
     /// Complete a previous `submit`.
     pub fn complete(&self) {
-        if self.active.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.cond.notify_all()
-        }
+        self.state.lock().unwrap().as_mut().map(|val| {
+            *val -= 1;
+
+            if *val == 0 {
+                self.cond.notify_all()
+            }
+        });
     }
 
     /// Poison the WaitGroup so all `join`ing threads panic.
     pub fn poison(&self) {
         // Set the poison flag to false.
-        *self.lock.lock().unwrap() = false;
+        *self.state.lock().unwrap() = None;
 
         // Wake all pending joiners so they panic.
         self.cond.notify_all()
@@ -269,22 +266,9 @@ impl WaitGroup {
     ///
     /// Before submitting, `join` will always return immediately.
     pub fn join(&self) {
-        // Check optimistically once before loading the lock.
-        if self.active.load(Ordering::SeqCst) <= 0 {
-            return
-        }
-
-        let mut lock = self.lock.lock().unwrap();
-        loop {
-            if !*lock {
-                panic!("WaitGroup explicitly poisoned!");
-            }
-
-            if self.active.load(Ordering::SeqCst) <= 0 {
-                return
-            } else {
-                lock = self.cond.wait(lock).unwrap();
-            }
+        let mut lock = self.state.lock().unwrap();
+        while lock.expect("WaitGroup explicitly poisoned!") > 0 {
+            lock = self.cond.wait(lock).unwrap();
         }
     }
 }
