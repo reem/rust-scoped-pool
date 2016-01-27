@@ -81,9 +81,9 @@ impl Pool {
     /// WARNING: Extreme care should be taken to not call shutdown concurrently
     /// with any scoped calls, or deadlock can occur.
     ///
-    /// Only guaranteed to shut down all threads started before the call to shutdown,
-    /// threads started concurrently or after the call to shutdown (using `expand`) may
-    /// or may not be shut down.
+    /// All threads will be shut down eventually, but only threads started before the
+    /// call to shutdown are guaranteed to be shut down before the call to shutdown
+    /// returns.
     pub fn shutdown(&self) {
         // Start the shutdown process.
         self.queue.push(PoolMessage::Quit);
