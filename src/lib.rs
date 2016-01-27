@@ -23,7 +23,8 @@ use std::sync::{Arc, Mutex, Condvar};
 /// the `Scope` type directly.
 #[derive(Clone)]
 pub struct Pool {
-    queue: Arc<MsQueue<PoolMessage>>
+    queue: Arc<MsQueue<PoolMessage>>,
+    wait: Arc<WaitGroup>
 }
 
 impl Pool {
@@ -47,7 +48,8 @@ impl Pool {
     /// worker threads are added.
     pub fn empty() -> Pool {
         Pool {
-            queue: Arc::new(MsQueue::new())
+            queue: Arc::new(MsQueue::new()),
+            wait: Arc::new(WaitGroup::new())
         }
     }
 
@@ -84,7 +86,10 @@ impl Pool {
     /// or may not be shut down.
     pub fn shutdown(&self) {
         // Start the shutdown process.
-        self.queue.push(PoolMessage::Quit)
+        self.queue.push(PoolMessage::Quit);
+
+        // Wait for it to complete.
+        self.wait.join()
     }
 
     /// Expand the Pool by spawning an additional thread.
@@ -92,17 +97,33 @@ impl Pool {
     /// Can accelerate the completion of running jobs.
     pub fn expand(&self) {
         let pool = self.clone();
+
+        // Submit the new thread to the thread waitgroup.
+        pool.wait.submit();
+
+        // Start the actual thread.
         thread::spawn(move || pool.run_thread());
     }
 
     fn run_thread(&self) {
+        // Create a sentinel to capture panics on this thread.
+        let thread_sentinel = Sentinel(self.clone(), Some(self.wait.clone()));
+
         loop {
             match self.queue.pop() {
                 // On Quit, repropogate and quit.
                 PoolMessage::Quit => {
+                    // Repropogate the Quit message to other threads.
                     self.queue.push(PoolMessage::Quit);
+
+                    // Cancel the thread sentinel so we don't panic waiting
+                    // shutdown threads.
+                    thread_sentinel.cancel();
+
+                    // Terminate the thread.
                     break
                 },
+
                 // On Task, run the task then complete the WaitGroup.
                 PoolMessage::Task(job, wait) => {
                     let sentinel = Sentinel(self.clone(), Some(wait.clone()));
@@ -348,6 +369,12 @@ mod test {
         forever.zoom(|scope| scope.execute(|| ran.store(true, Ordering::SeqCst)));
 
         assert!(ran.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_shutdown() {
+        let pool = Pool::new(4);
+        pool.shutdown();
     }
 
     #[test]
