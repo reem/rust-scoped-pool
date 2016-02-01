@@ -31,6 +31,11 @@ impl Pool {
     ///
     /// If `size` is zero, no threads will be spawned. Threads can
     /// be added later via `expand`.
+    ///
+    /// NOTE: Since Pool can be freely cloned, it does not represent a unique
+    /// handle to the thread pool. As a consequence, the thread pool is not
+    /// automatically shut down; you must explicitly call `Pool::shutdown` to
+    /// shut down the pool.
     pub fn new(size: usize) -> Pool {
         // Create an empty pool.
         let pool = Pool::empty();
