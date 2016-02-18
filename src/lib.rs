@@ -111,7 +111,7 @@ impl Pool {
 
     fn run_thread(&self) {
         // Create a sentinel to capture panics on this thread.
-        let thread_sentinel = Sentinel(self.clone(), Some(self.wait.clone()));
+        let mut thread_sentinel = ThreadSentinel(Some(self.clone()));
 
         loop {
             match self.queue.pop() {
@@ -121,7 +121,7 @@ impl Pool {
                     self.queue.push(PoolMessage::Quit);
 
                     // Cancel the thread sentinel so we don't panic waiting
-                    // shutdown threads.
+                    // shutdown threads, and don't restart the thread.
                     thread_sentinel.cancel();
 
                     // Terminate the thread.
@@ -243,15 +243,23 @@ pub struct WaitGroup {
     // use to wait for the active tasks to complete.
     //
     // If the state is set to None, the group is poisoned.
-    state: Mutex<Option<usize>>,
+    state: Mutex<WaitGroupState>,
     cond: Condvar
+}
+
+struct WaitGroupState {
+    pending: usize,
+    poisoned: bool
 }
 
 impl WaitGroup {
     /// Create a new empty WaitGroup.
     pub fn new() -> Self {
         WaitGroup {
-            state: Mutex::new(Some(0)),
+            state: Mutex::new(WaitGroupState {
+                pending: 0,
+                poisoned: false
+            }),
             cond: Condvar::new()
         }
     }
@@ -259,27 +267,36 @@ impl WaitGroup {
     /// Submit to this WaitGroup, causing `join` to wait
     /// for an additional `complete`.
     pub fn submit(&self) {
-        self.state.lock().unwrap().as_mut().map(|val| *val += 1);
+        self.state.lock().unwrap().pending += 1;
     }
 
     /// Complete a previous `submit`.
     pub fn complete(&self) {
-        self.state.lock().unwrap().as_mut().map(|val| {
-            *val -= 1;
+        let mut state = self.state.lock().unwrap();
 
-            if *val == 0 {
-                self.cond.notify_all()
-            }
-        });
+        // Mark the current job complete.
+        state.pending -= 1;
+
+        // If that was the last job, wake joiners.
+        if state.pending == 0 {
+            self.cond.notify_all()
+        }
     }
 
     /// Poison the WaitGroup so all `join`ing threads panic.
     pub fn poison(&self) {
-        // Set the poison flag to false.
-        *self.state.lock().unwrap() = None;
+        let mut state = self.state.lock().unwrap();
 
-        // Wake all pending joiners so they panic.
-        self.cond.notify_all()
+        // Set the poison flag to false.
+        state.poisoned = true;
+
+        // Mark the current job complete.
+        state.pending -= 1;
+
+        // If that was the last job, wake joiners.
+        if state.pending == 0 {
+            self.cond.notify_all()
+        }
     }
 
     /// Wait for `submit`s to this WaitGroup to be `complete`d.
@@ -292,8 +309,13 @@ impl WaitGroup {
     /// Before submitting, `join` will always return immediately.
     pub fn join(&self) {
         let mut lock = self.state.lock().unwrap();
-        while lock.expect("WaitGroup explicitly poisoned!") > 0 {
+
+        while lock.pending > 0 {
             lock = self.cond.wait(lock).unwrap();
+        }
+
+        if lock.poisoned {
+            panic!("WaitGroup explicitly poisoned!")
         }
     }
 }
@@ -315,6 +337,30 @@ impl Drop for Sentinel {
     }
 }
 
+struct ThreadSentinel(Option<Pool>);
+
+impl ThreadSentinel {
+    fn cancel(&mut self) {
+        self.0.take().map(|pool| {
+            pool.wait.complete();
+        });
+    }
+}
+
+impl Drop for ThreadSentinel {
+    fn drop(&mut self) {
+        self.0.take().map(|pool| {
+            // NOTE: We restart the thread first so we don't accidentally
+            // hit zero threads before restarting.
+
+            // Restart the thread.
+            pool.expand();
+
+            // Poison the pool.
+            pool.wait.poison();
+        });
+    }
+}
 
 trait Task {
     fn run(self: Box<Self>);
@@ -326,7 +372,9 @@ impl<F: FnOnce()> Task for F {
 
 #[cfg(test)]
 mod test {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+    use std::thread::sleep;
 
     use {Pool, Scope};
 
@@ -445,6 +493,69 @@ mod test {
     fn test_recurse_execute_panic() {
         let pool = Pool::new(4);
         pool.scoped(|scope| scope.recurse(|scope2| scope2.execute(|| panic!())));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_scoped_panic_waits_for_all_tasks() {
+        struct Canary<'a> {
+            drops: DropCounter<'a>,
+            expected: usize
+        };
+
+        #[derive(Clone)]
+        struct DropCounter<'a>(&'a AtomicUsize);
+
+        impl<'a> Drop for DropCounter<'a> {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        impl<'a> Drop for Canary<'a> {
+            fn drop(&mut self) {
+                let drops = self.drops.0.load(Ordering::SeqCst);
+                assert_eq!(drops, self.expected);
+            }
+        }
+
+        let tasks = 50;
+        let panicking_task_fraction = 10;
+        let panicking_tasks = tasks / panicking_task_fraction;
+        let expected_drops = tasks + panicking_tasks;
+
+        let counter = Box::new(AtomicUsize::new(0));
+        let drops = DropCounter(&*counter);
+
+        // Actual check occurs on drop of this during unwinding.
+        let _canary = Canary {
+            drops: drops.clone(),
+            expected: expected_drops
+        };
+
+        let pool = Pool::new(12);
+
+        pool.scoped(|scope| {
+            for task in 0..tasks {
+                let drop_counter = drops.clone();
+
+                scope.execute(move || {
+                    sleep(Duration::from_millis(10));
+
+                    drop::<DropCounter>(drop_counter);
+                });
+
+                if task % panicking_task_fraction == 0 {
+                    let drop_counter = drops.clone();
+
+                    scope.execute(move || {
+                        // Just make sure we capture it.
+                        let _drops = drop_counter;
+                        panic!();
+                    });
+                }
+            }
+        });
     }
 }
 
