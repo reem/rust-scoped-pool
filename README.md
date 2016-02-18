@@ -2,6 +2,8 @@
 
 > A flexible thread pool providing scoped and static threads.
 
+## [Documentation](https://crates.fyi/crates/scoped-pool/0.1.5)
+
 ## Overview
 
 Example of simple use (applying a transformation to every item in an array):
