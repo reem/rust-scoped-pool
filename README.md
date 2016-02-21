@@ -2,7 +2,7 @@
 
 > A flexible thread pool providing scoped and static threads.
 
-## [Documentation](https://crates.fyi/crates/scoped-pool/0.1.5)
+## [Documentation](https://crates.fyi/crates/scoped-pool/0.1.6)
 
 ## Overview
 
@@ -34,7 +34,7 @@ Also includes the raw `WaitGroup` type, which can be used to implement similar
 "wait for a group of actions to complete" logic, and is used in `Pool` and
 `Scope`.
 
-See the generated documentation (`cargo doc`) for details.
+See the generated documentation (linked above) for details.
 
 ## Unique Aspects
 
