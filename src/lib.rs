@@ -140,6 +140,24 @@ impl Pool {
 }
 
 /// An execution scope, represents a set of jobs running on a Pool.
+///
+/// ## Understanding Scope lifetimes
+///
+/// Besides `Scope<'static>`, all `Scope` objects are accessed behind a
+/// reference of the form `&'scheduler Scope<'scope>`.
+///
+/// `'scheduler` is the lifetime associated with the *body* of the
+/// "scheduler" function (functions passed to `zoom`/`scoped`).
+///
+/// `'scope` is the lifetime which data captured in `execute` or `recurse`
+/// closures must outlive - in other words, `'scope` is the maximum lifetime
+/// of all jobs scheduler on a `Scope`.
+///
+/// Note that since `'scope: 'scheduler` (`'scope` outlives `'scheduler`)
+/// `&'scheduler Scope<'scope>` can't be captured in an `execute` closure;
+/// this is the reason for the existence of the `recurse` API, which will
+/// inject the same scope with a new `'scheduler` lifetime (this time set
+/// to the body of the function passed to `recurse`).
 pub struct Scope<'scope> {
     pool: Pool,
     wait: Arc<WaitGroup>,
