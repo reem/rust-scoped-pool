@@ -2,7 +2,7 @@
 
 > A flexible thread pool providing scoped and static threads.
 
-## [Documentation](https://crates.fyi/crates/scoped-pool/0.1.7)
+## [Documentation](https://crates.fyi/crates/scoped-pool/0.1.8)
 
 ## Overview
 
