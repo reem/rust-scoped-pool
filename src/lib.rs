@@ -8,6 +8,7 @@
 
 extern crate variance;
 extern crate crossbeam;
+extern crate scopeguard;
 
 use variance::InvariantLifetime as Id;
 use crossbeam::sync::MsQueue;
@@ -213,11 +214,11 @@ impl<'scope> Scope<'scope> {
           'scope: 'smaller {
         let scope = unsafe { self.refine::<'smaller>() };
 
-        // Schedule all tasks then join all tasks
-        let res = scheduler(&scope);
-        scope.join();
+        // Join the scope either on completion of the scheduler or panic.
+        let _guard = scopeguard::guard((), |_| scope.join());
 
-        res
+        // Schedule all tasks then join all tasks
+        scheduler(&scope)
     }
 
     /// Awaits all jobs submitted on this Scope to be completed.
@@ -513,30 +514,30 @@ mod test {
         pool.scoped(|scope| scope.recurse(|scope2| scope2.execute(|| panic!())));
     }
 
+    struct Canary<'a> {
+        drops: DropCounter<'a>,
+        expected: usize
+    }
+
+    #[derive(Clone)]
+    struct DropCounter<'a>(&'a AtomicUsize);
+
+    impl<'a> Drop for DropCounter<'a> {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl<'a> Drop for Canary<'a> {
+        fn drop(&mut self) {
+            let drops = self.drops.0.load(Ordering::SeqCst);
+            assert_eq!(drops, self.expected);
+        }
+    }
+
     #[test]
     #[should_panic]
     fn test_scoped_panic_waits_for_all_tasks() {
-        struct Canary<'a> {
-            drops: DropCounter<'a>,
-            expected: usize
-        };
-
-        #[derive(Clone)]
-        struct DropCounter<'a>(&'a AtomicUsize);
-
-        impl<'a> Drop for DropCounter<'a> {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-
-        impl<'a> Drop for Canary<'a> {
-            fn drop(&mut self) {
-                let drops = self.drops.0.load(Ordering::SeqCst);
-                assert_eq!(drops, self.expected);
-            }
-        }
-
         let tasks = 50;
         let panicking_task_fraction = 10;
         let panicking_tasks = tasks / panicking_task_fraction;
@@ -573,6 +574,34 @@ mod test {
                     });
                 }
             }
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_scheduler_panic_waits_for_tasks() {
+        let tasks = 50;
+        let counter = Box::new(AtomicUsize::new(0));
+        let drops = DropCounter(&*counter);
+
+        let _canary = Canary {
+            drops: drops.clone(),
+            expected: tasks
+        };
+
+        let pool = Pool::new(12);
+
+        pool.scoped(|scope| {
+            for _ in 0..tasks {
+                let drop_counter = drops.clone();
+
+                scope.execute(move || {
+                    sleep(Duration::from_millis(25));
+                    drop::<DropCounter>(drop_counter);
+                });
+            }
+
+            panic!();
         });
     }
 }

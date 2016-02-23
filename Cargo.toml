@@ -11,4 +11,5 @@ license = "MIT"
 [dependencies]
 variance = "0.1"
 crossbeam = "0.2"
+scopeguard = "0.1"
 
