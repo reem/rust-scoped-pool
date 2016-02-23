@@ -8,6 +8,8 @@
 
 extern crate variance;
 extern crate crossbeam;
+
+#[macro_use]
 extern crate scopeguard;
 
 use variance::InvariantLifetime as Id;
@@ -215,7 +217,7 @@ impl<'scope> Scope<'scope> {
         let scope = unsafe { self.refine::<'smaller>() };
 
         // Join the scope either on completion of the scheduler or panic.
-        let _guard = scopeguard::guard((), |_| scope.join());
+        defer!(scope.join());
 
         // Schedule all tasks then join all tasks
         scheduler(&scope)
