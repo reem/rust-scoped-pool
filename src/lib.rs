@@ -39,6 +39,7 @@ impl Pool {
     /// handle to the thread pool. As a consequence, the thread pool is not
     /// automatically shut down; you must explicitly call `Pool::shutdown` to
     /// shut down the pool.
+    #[inline]
     pub fn new(size: usize) -> Pool {
         // Create an empty pool.
         let pool = Pool::empty();
@@ -53,6 +54,7 @@ impl Pool {
     ///
     /// Note that no jobs will run until `expand` is called and
     /// worker threads are added.
+    #[inline]
     pub fn empty() -> Pool {
         Pool {
             queue: Arc::new(MsQueue::new()),
@@ -60,11 +62,21 @@ impl Pool {
         }
     }
 
+    /// How many worker threads are currently active.
+    #[inline]
+    pub fn workers(&self) -> usize {
+        // All threads submit themselves when they start and
+        // complete when they stop, so the threads we are waiting
+        // for are still active.
+        self.wait.waiting()
+    }
+
     /// Spawn a `'static'` job to be run on this pool.
     ///
     /// We do not wait on the job to complete.
     ///
     /// Panics in the job will propogate to the calling thread.
+    #[inline]
     pub fn spawn<F: FnOnce() + Send + 'static>(&self, job: F) {
         // Run the job on a scope which lasts forever, and won't block.
         Scope::forever(self.clone()).execute(job)
@@ -77,6 +89,7 @@ impl Pool {
     ///
     /// Panics in any of the jobs or in the scheduler function itself
     /// will propogate to the calling thread.
+    #[inline]
     pub fn scoped<'scope, F, R>(&self, scheduler: F) -> R
     where F: FnOnce(&Scope<'scope>) -> R {
         // Zoom to the correct scope, then run the scheduler.
@@ -91,6 +104,7 @@ impl Pool {
     /// All threads will be shut down eventually, but only threads started before the
     /// call to shutdown are guaranteed to be shut down before the call to shutdown
     /// returns.
+    #[inline]
     pub fn shutdown(&self) {
         // Start the shutdown process.
         self.queue.push(PoolMessage::Quit);
@@ -102,6 +116,7 @@ impl Pool {
     /// Expand the Pool by spawning an additional thread.
     ///
     /// Can accelerate the completion of running jobs.
+    #[inline]
     pub fn expand(&self) {
         let pool = self.clone();
 
@@ -112,7 +127,7 @@ impl Pool {
         thread::spawn(move || pool.run_thread());
     }
 
-    fn run_thread(&self) {
+    fn run_thread(self) {
         // Create a sentinel to capture panics on this thread.
         let mut thread_sentinel = ThreadSentinel(Some(self.clone()));
 
@@ -169,6 +184,7 @@ pub struct Scope<'scope> {
 
 impl<'scope> Scope<'scope> {
     /// Create a Scope which lasts forever.
+    #[inline]
     pub fn forever(pool: Pool) -> Scope<'static> {
         Scope {
             pool: pool,
@@ -228,10 +244,12 @@ impl<'scope> Scope<'scope> {
     /// Only guaranteed to join jobs which where `execute`d logically
     /// prior to `join`. Jobs `execute`d concurrently with `join` may
     /// or may not be completed before `join` returns.
+    #[inline]
     pub fn join(&self) {
         self.wait.join()
     }
 
+    #[inline]
     unsafe fn clone(&self) -> Self {
         Scope {
             pool: self.pool.clone(),
@@ -241,6 +259,7 @@ impl<'scope> Scope<'scope> {
     }
 
     // Create a new scope with a smaller lifetime on the same pool.
+    #[inline]
     unsafe fn refine<'other>(&self) -> Scope<'other> where 'scope: 'other {
         Scope {
             pool: self.pool.clone(),
@@ -275,6 +294,7 @@ struct WaitGroupState {
 
 impl WaitGroup {
     /// Create a new empty WaitGroup.
+    #[inline]
     pub fn new() -> Self {
         WaitGroup {
             state: Mutex::new(WaitGroupState {
@@ -285,13 +305,21 @@ impl WaitGroup {
         }
     }
 
+    /// How many submitted tasks are waiting for completion.
+    #[inline]
+    pub fn waiting(&self) -> usize {
+        self.state.lock().unwrap().pending
+    }
+
     /// Submit to this WaitGroup, causing `join` to wait
     /// for an additional `complete`.
+    #[inline]
     pub fn submit(&self) {
         self.state.lock().unwrap().pending += 1;
     }
 
     /// Complete a previous `submit`.
+    #[inline]
     pub fn complete(&self) {
         let mut state = self.state.lock().unwrap();
 
@@ -305,6 +333,7 @@ impl WaitGroup {
     }
 
     /// Poison the WaitGroup so all `join`ing threads panic.
+    #[inline]
     pub fn poison(&self) {
         let mut state = self.state.lock().unwrap();
 
@@ -328,6 +357,7 @@ impl WaitGroup {
     /// be waited for.
     ///
     /// Before submitting, `join` will always return immediately.
+    #[inline]
     pub fn join(&self) {
         let mut lock = self.state.lock().unwrap();
 
