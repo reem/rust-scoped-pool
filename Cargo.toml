@@ -13,3 +13,7 @@ variance = "0.1"
 crossbeam = "0.2"
 scopeguard = "0.1"
 
+[dev-dependencies]
+rand = "0.3"
+itertools = "0.4"
+
