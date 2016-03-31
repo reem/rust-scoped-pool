@@ -16,6 +16,7 @@ use variance::InvariantLifetime as Id;
 use crossbeam::sync::MsQueue;
 
 use std::{thread, mem};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Condvar};
 
 /// A thread-pool providing scoped and unscoped threads.
@@ -279,17 +280,10 @@ enum PoolMessage {
 /// Adding new jobs is done with `submit`, jobs are completed with `complete`,
 /// and any thread may wait for all jobs to be `complete`d with `join`.
 pub struct WaitGroup {
-    // The lock and condition variable the joining threads
-    // use to wait for the active tasks to complete.
-    //
-    // If the state is set to None, the group is poisoned.
-    state: Mutex<WaitGroupState>,
+    pending: AtomicUsize,
+    poisoned: AtomicBool,
+    lock: Mutex<()>,
     cond: Condvar
-}
-
-struct WaitGroupState {
-    pending: usize,
-    poisoned: bool
 }
 
 impl WaitGroup {
@@ -297,10 +291,9 @@ impl WaitGroup {
     #[inline]
     pub fn new() -> Self {
         WaitGroup {
-            state: Mutex::new(WaitGroupState {
-                pending: 0,
-                poisoned: false
-            }),
+            pending: AtomicUsize::new(0),
+            poisoned: AtomicBool::new(false),
+            lock: Mutex::new(()),
             cond: Condvar::new()
         }
     }
@@ -308,26 +301,25 @@ impl WaitGroup {
     /// How many submitted tasks are waiting for completion.
     #[inline]
     pub fn waiting(&self) -> usize {
-        self.state.lock().unwrap().pending
+        self.pending.load(Ordering::SeqCst)
     }
 
     /// Submit to this WaitGroup, causing `join` to wait
     /// for an additional `complete`.
     #[inline]
     pub fn submit(&self) {
-        self.state.lock().unwrap().pending += 1;
+        self.pending.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Complete a previous `submit`.
     #[inline]
     pub fn complete(&self) {
-        let mut state = self.state.lock().unwrap();
-
         // Mark the current job complete.
-        state.pending -= 1;
+        let old = self.pending.fetch_sub(1, Ordering::SeqCst);
 
         // If that was the last job, wake joiners.
-        if state.pending == 0 {
+        if old == 1 {
+            let _lock = self.lock.lock().unwrap();
             self.cond.notify_all()
         }
     }
@@ -335,16 +327,15 @@ impl WaitGroup {
     /// Poison the WaitGroup so all `join`ing threads panic.
     #[inline]
     pub fn poison(&self) {
-        let mut state = self.state.lock().unwrap();
-
-        // Set the poison flag to false.
-        state.poisoned = true;
+        // Poison the waitgroup.
+        self.poisoned.store(true, Ordering::SeqCst);
 
         // Mark the current job complete.
-        state.pending -= 1;
+        let old = self.pending.fetch_sub(1, Ordering::SeqCst);
 
         // If that was the last job, wake joiners.
-        if state.pending == 0 {
+        if old == 1 {
+            let _lock = self.lock.lock().unwrap();
             self.cond.notify_all()
         }
     }
@@ -359,13 +350,13 @@ impl WaitGroup {
     /// Before submitting, `join` will always return immediately.
     #[inline]
     pub fn join(&self) {
-        let mut lock = self.state.lock().unwrap();
+        let mut lock = self.lock.lock().unwrap();
 
-        while lock.pending > 0 {
+        while self.pending.load(Ordering::SeqCst) > 0 {
             lock = self.cond.wait(lock).unwrap();
         }
 
-        if lock.poisoned {
+        if self.poisoned.load(Ordering::SeqCst) {
             panic!("WaitGroup explicitly poisoned!")
         }
     }
