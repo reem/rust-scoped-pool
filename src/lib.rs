@@ -26,8 +26,8 @@ use std::sync::{Arc, Mutex, Condvar};
 /// the `Scope` type directly.
 #[derive(Clone)]
 pub struct Pool {
-    queue: Arc<MsQueue<PoolMessage>>,
-    wait: Arc<WaitGroup>
+    wait: Arc<WaitGroup>,
+    inner: Arc<PoolInner>
 }
 
 impl Pool {
@@ -51,6 +51,29 @@ impl Pool {
         pool
     }
 
+    /// Create a new Pool with `size` threads and given thread config.
+    ///
+    /// If `size` is zero, no threads will be spawned. Threads can
+    /// be added later via `expand`.
+    ///
+    /// NOTE: Since Pool can be freely cloned, it does not represent a unique
+    /// handle to the thread pool. As a consequence, the thread pool is not
+    /// automatically shut down; you must explicitly call `Pool::shutdown` to
+    /// shut down the pool.
+    #[inline]
+    pub fn with_thread_config(size: usize, thread_config: ThreadConfig) -> Pool {
+        // Create an empty pool with configuration.
+        let pool = Pool {
+            wait: Arc::new(WaitGroup::new()),
+            inner: Arc::new(PoolInner::with_thread_config(thread_config))
+        };
+
+        // Start the requested number of threads.
+        for _ in 0..size { pool.expand(); }
+
+        pool
+    }
+
     /// Create an empty Pool, with no threads.
     ///
     /// Note that no jobs will run until `expand` is called and
@@ -58,8 +81,8 @@ impl Pool {
     #[inline]
     pub fn empty() -> Pool {
         Pool {
-            queue: Arc::new(MsQueue::new()),
-            wait: Arc::new(WaitGroup::new())
+            wait: Arc::new(WaitGroup::new()),
+            inner: Arc::new(PoolInner::default())
         }
     }
 
@@ -108,7 +131,7 @@ impl Pool {
     #[inline]
     pub fn shutdown(&self) {
         // Start the shutdown process.
-        self.queue.push(PoolMessage::Quit);
+        self.inner.queue.push(PoolMessage::Quit);
 
         // Wait for it to complete.
         self.wait.join()
@@ -124,8 +147,20 @@ impl Pool {
         // Submit the new thread to the thread waitgroup.
         pool.wait.submit();
 
+        let thread_number = self.inner.thread_counter.fetch_add(1, Ordering::SeqCst);
+
+        // Deal with thread configuration.
+        let mut builder = thread::Builder::new();
+        if let Some(ref prefix) = self.inner.thread_config.prefix {
+            let name = format!("{}{}", prefix, thread_number);
+            builder = builder.name(name);
+        }
+        if let Some(stack_size) = self.inner.thread_config.stack_size {
+            builder = builder.stack_size(stack_size);
+        }
+
         // Start the actual thread.
-        thread::spawn(move || pool.run_thread());
+        builder.spawn(move || pool.run_thread()).unwrap();
     }
 
     fn run_thread(self) {
@@ -133,11 +168,11 @@ impl Pool {
         let mut thread_sentinel = ThreadSentinel(Some(self.clone()));
 
         loop {
-            match self.queue.pop() {
+            match self.inner.queue.pop() {
                 // On Quit, repropogate and quit.
                 PoolMessage::Quit => {
                     // Repropogate the Quit message to other threads.
-                    self.queue.push(PoolMessage::Quit);
+                    self.inner.queue.push(PoolMessage::Quit);
 
                     // Cancel the thread sentinel so we don't panic waiting
                     // shutdown threads, and don't restart the thread.
@@ -154,6 +189,65 @@ impl Pool {
                     sentinel.cancel();
                 }
             }
+        }
+    }
+}
+
+struct PoolInner {
+    queue: MsQueue<PoolMessage>,
+    thread_config: ThreadConfig,
+    thread_counter: AtomicUsize
+}
+
+impl PoolInner {
+    fn with_thread_config(thread_config: ThreadConfig) -> Self {
+        PoolInner { thread_config: thread_config, ..Self::default() }
+    }
+}
+
+impl Default for PoolInner {
+    fn default() -> Self {
+        PoolInner {
+            queue: MsQueue::new(),
+            thread_config: ThreadConfig::default(),
+            thread_counter: AtomicUsize::new(1)
+        }
+    }
+}
+
+/// Thread configuration. Provides detailed control over the properties and behavior of new
+/// threads.
+#[derive(Default)]
+pub struct ThreadConfig {
+    prefix: Option<String>,
+    stack_size: Option<usize>,
+}
+
+impl ThreadConfig {
+    /// Generates the base configuration for spawning a thread, from which configuration methods
+    /// can be chained.
+    pub fn new() -> ThreadConfig {
+        ThreadConfig {
+            prefix: None,
+            stack_size: None,
+        }
+    }
+
+    /// Name prefix of spawned threads. Thread number will be appended to this prefix to form each
+    /// thread's unique name. Currently the name is used for identification only in panic
+    /// messages.
+    pub fn prefix<S: Into<String>>(self, prefix: S) -> ThreadConfig {
+        ThreadConfig {
+            prefix: Some(prefix.into()),
+            ..self
+        }
+    }
+
+    /// Sets the size of the stack for the new thread.
+    pub fn stack_size(self, stack_size: usize) -> ThreadConfig {
+        ThreadConfig {
+            stack_size: Some(stack_size),
+            ..self
         }
     }
 }
@@ -210,7 +304,7 @@ impl<'scope> Scope<'scope> {
         };
 
         // Submit the task to be executed.
-        self.pool.queue.push(PoolMessage::Task(task, self.wait.clone()));
+        self.pool.inner.queue.push(PoolMessage::Task(task, self.wait.clone()));
     }
 
     /// Add a job to this scope which itself will get access to the scope.
@@ -418,7 +512,7 @@ mod test {
     use std::time::Duration;
     use std::thread::sleep;
 
-    use {Pool, Scope};
+    use {Pool, Scope, ThreadConfig};
 
     #[test]
     fn test_simple_use() {
@@ -625,6 +719,30 @@ mod test {
             }
 
             panic!();
+        });
+    }
+
+    #[test]
+    fn test_no_thread_config() {
+        let pool = Pool::new(1);
+
+        pool.scoped(|scope| {
+            scope.execute(|| {
+                assert!(::std::thread::current().name().is_none());
+            });
+        });
+    }
+
+    #[test]
+    fn test_with_thread_config() {
+        let config = ThreadConfig::new().prefix("pool-");
+
+        let pool = Pool::with_thread_config(1, config);
+
+        pool.scoped(|scope| {
+            scope.execute(|| {
+                assert_eq!(::std::thread::current().name().unwrap(), "pool-1");
+            });
         });
     }
 }
