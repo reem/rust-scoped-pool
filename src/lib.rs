@@ -65,11 +65,7 @@ impl Pool {
         // Create an empty pool with configuration.
         let pool = Pool {
             wait: Arc::new(WaitGroup::new()),
-            inner: Arc::new(PoolInner {
-                queue: MsQueue::new(),
-                thread_config: thread_config,
-                thread_counter: AtomicUsize::new(1)
-            })
+            inner: Arc::new(PoolInner::with_thread_config(thread_config))
         };
 
         // Start the requested number of threads.
@@ -86,11 +82,7 @@ impl Pool {
     pub fn empty() -> Pool {
         Pool {
             wait: Arc::new(WaitGroup::new()),
-            inner: Arc::new(PoolInner {
-                queue: MsQueue::new(),
-                thread_config: ThreadConfig::new(),
-                thread_counter: AtomicUsize::new(1)
-            })
+            inner: Arc::new(PoolInner::default())
         }
     }
 
@@ -207,9 +199,25 @@ struct PoolInner {
     thread_counter: AtomicUsize
 }
 
+impl PoolInner {
+    fn with_thread_config(thread_config: ThreadConfig) -> Self {
+        PoolInner { thread_config: thread_config, ..Self::default() }
+    }
+}
+
+impl Default for PoolInner {
+    fn default() -> Self {
+        PoolInner {
+            queue: MsQueue::new(),
+            thread_config: ThreadConfig::default(),
+            thread_counter: AtomicUsize::new(1)
+        }
+    }
+}
+
 /// Thread configuration. Provides detailed control over the properties and behavior of new
 /// threads.
-#[derive(Clone)]
+#[derive(Default)]
 pub struct ThreadConfig {
     prefix: Option<String>,
     stack_size: Option<usize>,
