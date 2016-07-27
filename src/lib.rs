@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, Condvar};
 /// The primary ways of interacting with the `Pool` are
 /// the `spawn` and `scoped` convenience methods or through
 /// the `Scope` type directly.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct Pool {
     wait: Arc<WaitGroup>,
     inner: Arc<PoolInner>
@@ -64,8 +64,8 @@ impl Pool {
     pub fn with_thread_config(size: usize, thread_config: ThreadConfig) -> Pool {
         // Create an empty pool with configuration.
         let pool = Pool {
-            wait: Arc::new(WaitGroup::new()),
-            inner: Arc::new(PoolInner::with_thread_config(thread_config))
+            inner: Arc::new(PoolInner::with_thread_config(thread_config)),
+            ..Pool::default()
         };
 
         // Start the requested number of threads.
@@ -80,10 +80,7 @@ impl Pool {
     /// worker threads are added.
     #[inline]
     pub fn empty() -> Pool {
-        Pool {
-            wait: Arc::new(WaitGroup::new()),
-            inner: Arc::new(PoolInner::default())
-        }
+        Pool::default()
     }
 
     /// How many worker threads are currently active.
@@ -380,16 +377,22 @@ pub struct WaitGroup {
     cond: Condvar
 }
 
-impl WaitGroup {
-    /// Create a new empty WaitGroup.
-    #[inline]
-    pub fn new() -> Self {
+impl Default for WaitGroup {
+    fn default() -> Self {
         WaitGroup {
             pending: AtomicUsize::new(0),
             poisoned: AtomicBool::new(false),
             lock: Mutex::new(()),
             cond: Condvar::new()
         }
+    }
+}
+
+impl WaitGroup {
+    /// Create a new empty WaitGroup.
+    #[inline]
+    pub fn new() -> Self {
+        WaitGroup::default()
     }
 
     /// How many submitted tasks are waiting for completion.
