@@ -61,30 +61,21 @@ impl Pool {
     /// automatically shut down; you must explicitly call `Pool::shutdown` to
     /// shut down the pool.
     #[inline]
-    pub fn new_with_thread_config(size: usize, thread_config: ThreadConfig) -> Pool {
+    pub fn with_thread_config(size: usize, thread_config: ThreadConfig) -> Pool {
         // Create an empty pool with configuration.
-        let pool = Pool::with_thread_config(thread_config);
-
-        // Start the requested number of threads.
-        for _ in 0..size { pool.expand(); }
-
-        pool
-    }
-
-    /// Create an empty Pool, with no threads, with given thread config.
-    ///
-    /// Note that no jobs will run until `expand` is called and
-    /// worker threads are added.
-    #[inline]
-    pub fn with_thread_config(thread_config: ThreadConfig) -> Pool {
-        Pool {
+        let pool = Pool {
             wait: Arc::new(WaitGroup::new()),
             inner: Arc::new(PoolInner {
                 queue: MsQueue::new(),
                 thread_config: thread_config,
                 thread_counter: AtomicUsize::new(1)
             })
-        }
+        };
+
+        // Start the requested number of threads.
+        for _ in 0..size { pool.expand(); }
+
+        pool
     }
 
     /// Create an empty Pool, with no threads.
@@ -168,14 +159,12 @@ impl Pool {
 
         // Deal with thread configuration.
         let mut builder = thread::Builder::new();
-        if self.inner.thread_config.name_prefix.is_some() {
-            let name = format!("{}{}",
-                               self.inner.thread_config.name_prefix.as_ref().unwrap(),
-                               thread_number);
+        if let Some(ref prefix) = self.inner.thread_config.prefix {
+            let name = format!("{}{}", prefix, thread_number);
             builder = builder.name(name);
         }
-        if self.inner.thread_config.stack_size.is_some() {
-            builder = builder.stack_size(self.inner.thread_config.stack_size.unwrap());
+        if let Some(stack_size) = self.inner.thread_config.stack_size {
+            builder = builder.stack_size(stack_size);
         }
 
         // Start the actual thread.
@@ -222,7 +211,7 @@ struct PoolInner {
 /// threads.
 #[derive(Clone)]
 pub struct ThreadConfig {
-    name_prefix: Option<String>,
+    prefix: Option<String>,
     stack_size: Option<usize>,
 }
 
@@ -231,7 +220,7 @@ impl ThreadConfig {
     /// can be chained.
     pub fn new() -> ThreadConfig {
         ThreadConfig {
-            name_prefix: None,
+            prefix: None,
             stack_size: None,
         }
     }
@@ -239,9 +228,9 @@ impl ThreadConfig {
     /// Name prefix of spawned threads. Thread number will be appended to this prefix to form each
     /// thread's unique name. Currently the name is used for identification only in panic
     /// messages.
-    pub fn name_prefix<S: Into<String>>(self, name_prefix: S) -> ThreadConfig {
+    pub fn prefix<S: Into<String>>(self, prefix: S) -> ThreadConfig {
         ThreadConfig {
-            name_prefix: Some(name_prefix.into()),
+            prefix: Some(prefix.into()),
             ..self
         }
     }
@@ -738,9 +727,9 @@ mod test {
 
     #[test]
     fn test_with_thread_config() {
-        let config = ThreadConfig::new().name_prefix("pool-");
+        let config = ThreadConfig::new().prefix("pool-");
 
-        let pool = Pool::new_with_thread_config(1, config);
+        let pool = Pool::with_thread_config(1, config);
 
         pool.scoped(|scope| {
             scope.execute(|| {
