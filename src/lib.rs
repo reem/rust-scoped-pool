@@ -188,6 +188,51 @@ impl Pool {
             }
         }
     }
+
+    // Makes the current thread available to run jobs until the given
+    // WaitGroup is completed.
+    fn run_waiting_thread(self, wait: &WaitGroup) {
+        // Indicate to the Pool another thread is running.
+        self.wait.submit();
+
+        // Create a sentinel to capture panics on this thread.
+        let mut thread_sentinel = ThreadSentinel(Some(self.clone()));
+
+        loop {
+            match self.inner.queue.try_pop() {
+                // There are no jobs in the pool.
+                //
+                // This means one of three things has happened:
+                //   - the jobs we are waiting on are completed
+                //   - the jobs we are waiting on are being worked on by other threads
+                //   - currently running jobs will submit new jobs
+                None => {
+                    wait.join();
+                    break
+                },
+
+                // On Quit, repropogate and quit.
+                Some(PoolMessage::Quit) => {
+                    // Repropogate the Quit message to other threads.
+                    self.inner.queue.push(PoolMessage::Quit);
+
+                    // Cancel the thread sentinel so we don't panic waiting
+                    // shutdown threads, and don't restart the thread.
+                    thread_sentinel.cancel();
+
+                    // Terminate the thread.
+                    break
+                },
+
+                // On Task, run the task then complete the WaitGroup.
+                Some(PoolMessage::Task(job, wait)) => {
+                    let sentinel = Sentinel(self.clone(), Some(wait.clone()));
+                    job.run();
+                    sentinel.cancel();
+                }
+            }
+        }
+    }
 }
 
 struct PoolInner {
@@ -260,8 +305,10 @@ impl ThreadConfig {
 /// "scheduler" function (functions passed to `zoom`/`scoped`).
 ///
 /// `'scope` is the lifetime which data captured in `execute` or `recurse`
-/// closures must outlive - in other words, `'scope` is the maximum lifetime
-/// of all jobs scheduler on a `Scope`.
+/// closures must outlive - in other words, `'scope` is the minimum safe
+/// lifetime of any data captured in a job, and the maximum lifetime of
+/// the job itself; the job is guaranteed to be complete before the end
+/// of `'scope`.
 ///
 /// Note that since `'scope: 'scheduler` (`'scope` outlives `'scheduler`)
 /// `&'scheduler Scope<'scope>` can't be captured in an `execute` closure;
@@ -338,7 +385,10 @@ impl<'scope> Scope<'scope> {
     /// or may not be completed before `join` returns.
     #[inline]
     pub fn join(&self) {
-        self.wait.join()
+        // In order to avoid deadlocking if the number of waiting threads
+        // (threads calling Scope::join) exceeds the number of threads in the Pool,
+        // we make every waiting thread available to run jobs.
+        self.pool.clone().run_waiting_thread(&self.wait);
     }
 
     #[inline]
@@ -459,7 +509,7 @@ impl WaitGroup {
     }
 }
 
-// Poisons the given pool on drop unless canceled.
+// Poisons the given WaitGroup on drop unless canceled.
 //
 // Used to ensure panic propogation between jobs and waiting threads.
 struct Sentinel(Pool, Option<Arc<WaitGroup>>);
@@ -476,6 +526,9 @@ impl Drop for Sentinel {
     }
 }
 
+// Poisons the given Pool on drop unless canceled.
+//
+// Used to restart failed threads.
 struct ThreadSentinel(Option<Pool>);
 
 impl ThreadSentinel {
