@@ -697,6 +697,22 @@ mod test {
     }
 
     #[test]
+    fn no_leak() {
+        let counters = ::std::sync::Arc::new(());
+
+        let mut pool = Pool::new(4);
+        pool.scoped(|scoped| {
+            let c = ::std::sync::Arc::clone(&counters);
+            scoped.execute(move || {
+                let _c = c;
+                ::std::thread::sleep(::std::time::Duration::from_millis(100));
+            });
+        });
+        drop(pool);
+        assert_eq!(::std::sync::Arc::strong_count(&counters), 1);
+    }
+
+    #[test]
     #[should_panic]
     fn test_scheduler_panic_waits_for_tasks() {
         let tasks = 50;
