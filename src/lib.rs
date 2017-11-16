@@ -1,4 +1,3 @@
-#![cfg_attr(test, deny(warnings))]
 #![deny(missing_docs)]
 
 //! # scoped-pool
@@ -322,7 +321,7 @@ impl<'scope> Scope<'scope> {
     pub fn zoom<'smaller, F, R>(&self, scheduler: F) -> R
     where F: FnOnce(&Scope<'smaller>) -> R,
           'scope: 'smaller {
-        let scope = unsafe { self.refine::<'smaller>() };
+        let scope = unsafe { self.refine() };
 
         // Join the scope either on completion of the scheduler or panic.
         defer!(scope.join());
