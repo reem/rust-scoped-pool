@@ -13,7 +13,7 @@ extern crate crossbeam;
 extern crate scopeguard;
 
 use variance::InvariantLifetime as Id;
-use crossbeam::sync::MsQueue;
+use crossbeam::queue::MsQueue;
 
 use std::{thread, mem};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
