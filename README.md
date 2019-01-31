@@ -65,8 +65,10 @@ with the rest of your dependencies:
 
 ```toml
 [dependencies]
-scoped-pool = "1"
+scoped-pool = "1.1"
 ```
+
+`scoped-pool` currently requires Rust 1.28.
 
 ## Author
 
